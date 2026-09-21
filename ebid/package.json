@@ -1,0 +1,19 @@
+{
+  "name": "ebidding-automation",
+  "version": "2.0.0",
+  "description": "SAP E-Bidding automation — fast & reliability hardened",
+  "main": "ebidding-fast.js",
+  "scripts": {
+    "start": "node ebidding-fast.js",
+    "dry": "DRY_RUN=true node ebidding-fast.js",
+    "test": "node test/test-engine.js",
+    "harness": "node test-harness.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "axios-cookiejar-support": "^4.0.7",
+    "dotenv": "^16.4.0",
+    "tough-cookie": "^4.1.3",
+    "ws": "^8.17.0"
+  }
+}
