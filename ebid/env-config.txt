@@ -1,0 +1,43 @@
+#############################################
+#  SAP E-Bidding Bot  —  .env configuration
+#  Use kaise karein:
+#    1) is file ko ".env" naam se rename karo
+#       (ya content copy karke .env me paste karo)
+#    2) PASSWORD line me apna asli SAP password daalo
+#    3) baaki values already sahi hain
+#############################################
+
+# ─── SAP Connection ─────────────────────────
+BASE_URL=https://rise.eye2serve.com:8443
+USER_ID=2210181
+PASSWORD=your-password-here
+PLANT=6924
+
+# ─── CSV files ──────────────────────────────
+CSV_FILE=./files/input2.csv
+DELETE_CSV_FILE=./files/delete.csv
+RANK_CSV_FILE=./files/rank_records.csv
+AUTO_UPDATE_CSV_BIDS=true
+
+# ─── Captcha (162-image pool; koi external solver nahi) ─
+CAPTCHA_DATA_FILE=./data.json
+CAPTCHA_API_FALLBACK=false
+
+# ─── Batching / priority ────────────────────
+MAX_ROWS_PER_BATCH=3
+MAX_PARALLEL_BATCHES=1
+
+# ─── Window timing (IST :15 & :45 har 30 min) ─
+WINDOW_MINUTES=15,45
+WINDOW_SOURCE=computed
+WINDOW_DURATION_MIN=10
+
+# ─── Speed knobs (ms) ───────────────────────
+PREWARM_LEAD_MS=90000
+SUBMIT_LEAD_MS=500
+CAPTCHA_POLL_MS=10
+RETRY_GAP_MS=20
+
+# ─── Modes ──────────────────────────────────
+LOOP_CONTINUOUS=true
+DRY_RUN=false
