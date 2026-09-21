@@ -91,9 +91,9 @@ async function submitBatch(sap, store, rows, captcha, batchNo) {
 }
 
 // ── Sequential-pipelined submit: solve batch N+1 captcha while batch N flies ─
-async function submitPlan(sap, store, plan, prefetched) {
+async function submitPlan(sap, store, plan, prefetched, submittedKeys) {
+  submittedKeys = submittedKeys || new Set();
   log.bold(`Submitting ${plan.length} batch(es) — pipeline (parallel=${cfg.MAX_PARALLEL_BATCHES})`);
-  const submittedKeys = new Set();
 
   // Pre-solve captcha for batch 0 (prefetched during window-open poll if given).
   let nextCap = prefetched
@@ -113,97 +113,134 @@ async function submitPlan(sap, store, plan, prefetched) {
   return submittedKeys;
 }
 
-// ── Wait for window; prewarm; capture captcha the instant SAP opens ───────
-// Returns { status:'active'|'expired', prefetched, window }
-async function waitForWindow(sap, store) {
-  const w = tu.resolveWindow(sap.plantConf, sap.orderListData.NavBidCurrDtDm, sap.clockOffset,
-    cfg.WINDOW_MINUTES, { source: cfg.WINDOW_SOURCE, durationMin: cfg.WINDOW_DURATION_MIN });
-  const now = sap.serverNow();
-  const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19) + ' IST';
-  log.info(`Window [${w.source}] opens ${ist(w.start)} (in ${tu.fmtCountdown(w.start - now)}), closes ${ist(w.end)}`);
-  if (w.plantStart != null) log.info(`   (plantConf slot was ${ist(w.plantStart)} — ${w.source === 'computed' ? 'ignored, using IST :15/:45' : 'used'})`);
+// ── Log which matching orders exist (priority-tagged) ─────────────────────
+function logMatched(matched, submittedKeys, plan, openWindow) {
+  submittedKeys = submittedKeys || new Set();
+  if (!matched.length) return;
+  const pend = matched.filter(m => !submittedKeys.has(unitKey(m.item))).length;
+  log.bold(`📋 ${matched.length} matching order(s)${openWindow ? ' [WINDOW OPEN]' : ' [ready]'} — ${pend} pending, ${matched.length - pend} saved`);
+  for (const m of matched) {
+    const it = m.item;
+    const done = submittedKeys.has(unitKey(it));
+    const vip = String(it.Spi).trim() === '1164';
+    const grp = it.ClubId ? `club ${it.ClubId}` : 'single';
+    log[done ? 'ok' : 'info'](`   ${done ? '✔ saved ' : '• ready '}${vip ? '⭐1164 ' : '      '}${it.SapOrderId} | ${it.DestCityDesc} / SPI ${it.Spi} | ${grp} | bid ${m.bidAmount}`);
+  }
+  if (plan) log.info(`   → ${plan.length} batch(es) planned (order: 1164 → singles → clubs)`);
+}
 
-  if (now >= w.end) return { status: 'expired', window: w };
-  if (now >= w.start) return { status: 'active', prefetched: null, window: w };
-
-  let reloggedIn = false, prefetched = null;
+// ── Phase A: pre-window monitor. Keep fetching orders while the window is
+// CLOSED, match + build the batch plan ready, log matches. Near open, poll the
+// captcha endpoint to catch the exact moment SAP opens and prewarm batch-1.
+async function preWindowMonitor(sap, store, csv, w) {
+  const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19);
+  let reloggedIn = false, prefetched = null, lastSig = null;
+  log.info('Monitoring for orders while window is CLOSED...');
   while (sap.serverNow() < w.start) {
     const remain = w.start - sap.serverNow();
+    if (remain <= 60000 && !reloggedIn) { process.stdout.write('\n'); await sap.login(); reloggedIn = true; log.info('Re-logged in (T-60s), session warm'); }
 
-    // T-60s: silent re-login to guarantee a fresh CSRF/session at fire time.
-    if (remain <= 60000 && !reloggedIn) { await sap.login(); reloggedIn = true; log.info('Re-logged in (T-60s)'); }
-
-    // T-SUBMIT_LEAD_MS: poll captcha endpoint until SAP actually opens it.
+    // Near open: switch to fast captcha polling to detect the real open instant.
     if (remain <= cfg.SUBMIT_LEAD_MS) {
-      log.info('Polling for captcha (catching window-open)...');
-      const t0 = Date.now();
-      while (sap.serverNow() < w.start + 2000) { // small grace past start
-        const img = await sap.fetchCaptcha(true);
-        if (img) {
-          const s = await solver.solve(img, store, cfg, log);
-          log.ok(`Captcha available after ${Date.now() - t0}ms — prewarmed`);
-          prefetched = s ? s.result : null;
-          return { status: 'active', prefetched, window: w };
-        }
-        await sleep(cfg.CAPTCHA_POLL_MS);
+      const img = await sap.fetchCaptcha(true);
+      if (img) {
+        const s = await solver.solve(img, store, cfg, log);
+        prefetched = s ? s.result : null;
+        log.ok(`Captcha available — window opening, prewarmed${prefetched ? ' "' + prefetched + '"' : ''}`);
+        return prefetched;
       }
-      return { status: 'active', prefetched: null, window: w };
+      await sleep(cfg.CAPTCHA_POLL_MS);
+      continue;
     }
 
-    process.stdout.write(`\r  ⏳ open in ${tu.fmtCountdown(remain)}   `);
-    await sleep(remain > 5000 ? 500 : 50);
+    // Fetch fresh orders, match, keep plan ready, log only when the set changes.
+    await sap.fetchOrders();
+    const matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+    const sig = matched.map(m => m.item.SapOrderId).sort().join(',');
+    if (sig !== lastSig) {
+      process.stdout.write('\n');
+      const plan = planBatches(matched, cfg.MAX_ROWS_PER_BATCH);
+      if (matched.length) logMatched(matched, new Set(), plan, false);
+      else { log.warn('No matching orders yet — diagnostics:'); diagnoseMatch(csv.csvData, csv.deleteList, sap.bidRows, log); }
+      lastSig = sig;
+    }
+    process.stdout.write(`\r  ⏳ window opens ${ist(w.start)} IST (in ${tu.fmtCountdown(remain)}) | ${matched.length} match ready   `);
+    await sleep(Math.min(remain, cfg.ORDER_POLL_MS_CLOSED));
   }
   process.stdout.write('\n');
-  return { status: 'active', prefetched, window: w };
+  return prefetched;
+}
+
+// ── Phase B: while the window is OPEN (~5 min), keep fetching for NEW orders
+// and submit any not-yet-saved matches immediately (they can arrive late).
+async function windowSubmitLoop(sap, store, csv, w, prefetched) {
+  const submittedKeys = new Set();
+  let firstPass = true, lastSig = null;
+  while (sap.serverNow() < w.end) {
+    if (!await sap.fetchOrders()) { await sleep(cfg.ORDER_POLL_MS_OPEN); continue; }
+    const matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+    const pending = matched.filter(m => !submittedKeys.has(unitKey(m.item)));
+
+    const sig = matched.map(m => m.item.SapOrderId).sort().join(',') + '|' + submittedKeys.size;
+    if (sig !== lastSig) { logMatched(matched, submittedKeys, null, true); lastSig = sig; }
+
+    if (pending.length) {
+      const plan = planBatches(pending, cfg.MAX_ROWS_PER_BATCH);
+      log.bold(`⚡ ${pending.length} new/pending order(s) -> submitting ${plan.length} batch(es) now`);
+      await submitPlan(sap, store, plan, firstPass ? prefetched : null, submittedKeys);
+      firstPass = false;
+    } else {
+      const left = w.end - sap.serverNow();
+      process.stdout.write(`\r  🟢 window OPEN — watching for new orders (${tu.fmtCountdown(left)} left)   `);
+    }
+    await sleep(cfg.ORDER_POLL_MS_OPEN);
+  }
+  process.stdout.write('\n');
+  return submittedKeys;
 }
 
 // ── One full cycle ────────────────────────────────────────────────────────
 async function runCycle(sap, store) {
   if (!await sap.login()) { await sleep(5000); return { status: 'retry' }; }
   if (!await sap.fetchOrders()) { await sleep(5000); return { status: 'retry' }; }
-
   const csv = loadCsvFiles(cfg, log);
   if (!csv) { await sleep(5000); return { status: 'retry' }; }
-  if (!sap.plantConf) { log.warn('No active slot. Monitoring...'); await sleep(15000); return { status: 'idle' }; }
 
-  // PRE-COMPUTE batch plan now (Phase A).
-  let matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-  let plan = planBatches(matched, cfg.MAX_ROWS_PER_BATCH);
-  log.ok(`Pre-computed ${matched.length} matched rows -> ${plan.length} batch(es)`);
-  if (!matched.length) {
-    log.warn('No CSV matches — running diagnostics:');
-    diagnoseMatch(csv.csvData, csv.deleteList, sap.bidRows, log);
-  }
+  const w = tu.resolveWindow(sap.plantConf, sap.orderListData.NavBidCurrDtDm, sap.clockOffset,
+    cfg.WINDOW_MINUTES, { source: cfg.WINDOW_SOURCE, durationMin: cfg.WINDOW_DURATION_MIN });
+  const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19);
+  const now = sap.serverNow();
+  log.info(`Next window [${w.source}] opens ${ist(w.start)} IST (in ${tu.fmtCountdown(w.start - now)}), closes ${ist(w.end)} IST`);
+  if (w.plantStart != null && w.source === 'computed') log.info(`   (plantConf reported ${ist(w.plantStart)} IST — ignored, using IST :15/:45)`);
 
-  const win = await waitForWindow(sap, store);
-  if (win.status === 'expired') { log.warn('Window expired. Waiting next slot...'); await sleep(15000); return { status: 'expired', window: win.window }; }
+  // Initial match snapshot.
+  const matched0 = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+  if (matched0.length) logMatched(matched0, new Set(), planBatches(matched0, cfg.MAX_ROWS_PER_BATCH), false);
+  else { log.warn('No CSV matches yet — diagnostics:'); diagnoseMatch(csv.csvData, csv.deleteList, sap.bidRows, log); }
 
   if (cfg.DRY_RUN) {
     log.bold('=== DRY RUN: captcha fetch/solve only, no submit ===');
-    const cap = win.prefetched || await solver.fetchAndSolve(sap, store, cfg, log, 5);
-    log[cap ? 'ok' : 'warn'](cap ? `Captcha solved: "${cap}"` : 'No captcha solved');
-    // still exercise the plan (dry submit logs row counts)
-    if (plan.length) await submitPlan(sap, store, plan, cap);
+    const cap = await solver.fetchAndSolve(sap, store, cfg, log, 5);
+    log[cap ? 'ok' : 'warn'](cap ? `Captcha solved: "${cap}"` : 'No captcha solved (pool-miss or window closed)');
+    if (matched0.length) await submitPlan(sap, store, planBatches(matched0, cfg.MAX_ROWS_PER_BATCH), cap, new Set());
     log.bold('=== DRY RUN COMPLETE ===');
-    return { status: 'dry', window: win.window };
+    return { status: 'dry', window: w };
   }
 
-  // Phase B — at T=0: fresh fetch (orders may activate only at open), re-plan.
-  await sap.fetchOrders();
-  matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-  plan = planBatches(matched, cfg.MAX_ROWS_PER_BATCH);
-  log.ok(`Fire! re-planned ${matched.length} rows -> ${plan.length} batch(es)`);
+  if (now >= w.end) { log.warn('Window already closed. Waiting for next slot...'); await sleep(2000); return { status: 'expired', window: w }; }
 
-  if (plan.length) await submitPlan(sap, store, plan, win.prefetched);
-  else log.warn('Nothing to submit this slot.');
+  // Phase A — pre-window: keep polling for orders, build plan ready.
+  let prefetched = null;
+  if (sap.serverNow() < w.start) prefetched = await preWindowMonitor(sap, store, csv, w);
 
-  // Post-window: safe to touch disk now.
+  // Phase B — window OPEN: submit at T=0 and keep submitting late-arriving orders.
+  log.bold('🚀 WINDOW OPEN — firing batches & watching for new orders');
+  const submitted = await windowSubmitLoop(sap, store, csv, w, prefetched);
+  log.bold(`Window done — ${submitted.size} order-unit(s) submitted this slot`);
+
   flushDeferred(store, csv);
-
-  // Confirm rankings.
-  await sap.fetchOrders();
-  reportRanks(sap);
-  return { status: win.status || 'active', window: win.window };
+  if (await sap.fetchOrders()) reportRanks(sap);
+  return { status: 'active', window: w };
 }
 
 // ── Deferred disk writes (captcha cache append + CSV auto-fix) ────────────

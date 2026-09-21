@@ -40,6 +40,8 @@ const CONFIG = {
   SUBMIT_LEAD_MS: int(process.env.SUBMIT_LEAD_MS, 500),     // begin captcha poll this early
   CAPTCHA_POLL_MS: int(process.env.CAPTCHA_POLL_MS, 10),    // poll interval while window opens
   RETRY_GAP_MS: int(process.env.RETRY_GAP_MS, 20),          // tight adaptive retry gap
+  ORDER_POLL_MS_CLOSED: int(process.env.ORDER_POLL_MS_CLOSED, 5000), // fetch new orders while window CLOSED
+  ORDER_POLL_MS_OPEN: int(process.env.ORDER_POLL_MS_OPEN, 600),      // fetch new orders while window OPEN
   WINDOW_MINUTES: mins(process.env.WINDOW_MINUTES, [15, 45]),
   WINDOW_SOURCE: process.env.WINDOW_SOURCE || 'computed', // 'computed' (IST :15/:45) | 'plantConf'
   WINDOW_DURATION_MIN: int(process.env.WINDOW_DURATION_MIN, 10),

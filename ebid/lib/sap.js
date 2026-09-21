@@ -148,7 +148,7 @@ class SapClient {
   // Returns base64 image string, or null. quiet=true suppresses logs (for polling).
   async fetchCaptcha(quiet = false) {
     try {
-      const plant = this.plantConf.Plant;
+      const plant = this.plantConf ? this.plantConf.Plant : this.cfg.PLANT;
       const url = SRV + `/EbiddingCaptchaSet(Vendor='${this.cfg.USER_ID}',Plant='${plant}')`;
       const r = await this.client.get(url, { headers: { 'X-Csrf-Token': this.csrfToken } });
       const img = r.data.d.ImageString;
