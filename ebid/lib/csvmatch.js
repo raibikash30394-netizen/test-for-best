@@ -5,7 +5,7 @@ const path = require('path');
 
 function csvToJson(text) {
   const lines = text.split('\n');
-  const headers = lines[0].split(',').map(h => h.trim());
+  const headers = lines[0].replace(/^\uFEFF/, '').split(',').map(h => h.trim());
   const out = [];
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -60,4 +60,22 @@ function matchRows(csvData, deleteList, bidRows) {
   return matched;
 }
 
-module.exports = { csvToJson, loadCsvFiles, matchRows, csvBid };
+module.exports = { csvToJson, loadCsvFiles, matchRows, csvBid, diagnoseMatch };
+
+// Explain why matching produced few/zero results (called on 0 matches).
+function diagnoseMatch(csvData, deleteList, bidRows, log) {
+  const deleteSkipped = bidRows.filter(r => deleteList.includes((r.KunagName1 || '').trim())).length;
+  log.warn('── CSV MATCH DIAGNOSTICS ──');
+  log.warn(`Orders fetched: ${bidRows.length} | skipped by delete-list: ${deleteSkipped} | CSV rows: ${csvData.length}`);
+  if (csvData[0]) log.warn('CSV header keys: ' + JSON.stringify(Object.keys(csvData[0])));
+  log.warn('Sample ORDERS (DestCityDesc | Spi | KunagName1 | inDeleteList?):');
+  bidRows.slice(0, 6).forEach(r => {
+    const inDel = deleteList.includes((r.KunagName1 || '').trim());
+    log.warn(`   "${(r.DestCityDesc || '').trim()}" | "${(r.Spi || '').trim()}" | "${(r.KunagName1 || '').trim()}" | ${inDel ? 'YES(skipped)' : 'no'}`);
+  });
+  log.warn('Sample CSV (City Code Descriptio | Special Process Indi):');
+  csvData.slice(0, 6).forEach(c => {
+    log.warn(`   "${c['City Code Descriptio']}" | "${c['Special Process Indi']}"`);
+  });
+  log.warn('→ Match needs order.DestCityDesc === CSV "City Code Descriptio" AND order.Spi === CSV "Special Process Indi" (exact).');
+}

@@ -14,7 +14,7 @@ const { log } = require('./lib/log');
 const { SapClient } = require('./lib/sap');
 const { CaptchaStore } = require('./lib/captcha-store');
 const { planBatches, batchRows, unitKey } = require('./lib/batching');
-const { loadCsvFiles, matchRows } = require('./lib/csvmatch');
+const { loadCsvFiles, matchRows, diagnoseMatch } = require('./lib/csvmatch');
 const solver = require('./lib/solver');
 const tu = require('./lib/timeutil');
 
@@ -116,9 +116,12 @@ async function submitPlan(sap, store, plan, prefetched) {
 // ── Wait for window; prewarm; capture captcha the instant SAP opens ───────
 // Returns { status:'active'|'expired', prefetched, window }
 async function waitForWindow(sap, store) {
-  const w = tu.resolveWindow(sap.plantConf, sap.orderListData.NavBidCurrDtDm, sap.clockOffset, cfg.WINDOW_MINUTES);
+  const w = tu.resolveWindow(sap.plantConf, sap.orderListData.NavBidCurrDtDm, sap.clockOffset,
+    cfg.WINDOW_MINUTES, { source: cfg.WINDOW_SOURCE, durationMin: cfg.WINDOW_DURATION_MIN });
   const now = sap.serverNow();
-  log.info(`Window [${w.source}] start in ${tu.fmtCountdown(w.start - now)} (ends ${tu.fmtCountdown(w.end - now)})`);
+  const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19) + ' IST';
+  log.info(`Window [${w.source}] opens ${ist(w.start)} (in ${tu.fmtCountdown(w.start - now)}), closes ${ist(w.end)}`);
+  if (w.plantStart != null) log.info(`   (plantConf slot was ${ist(w.plantStart)} — ${w.source === 'computed' ? 'ignored, using IST :15/:45' : 'used'})`);
 
   if (now >= w.end) return { status: 'expired', window: w };
   if (now >= w.start) return { status: 'active', prefetched: null, window: w };
@@ -167,7 +170,10 @@ async function runCycle(sap, store) {
   let matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
   let plan = planBatches(matched, cfg.MAX_ROWS_PER_BATCH);
   log.ok(`Pre-computed ${matched.length} matched rows -> ${plan.length} batch(es)`);
-  if (!matched.length) log.warn('No CSV matches (check DestCityDesc / Spi columns)');
+  if (!matched.length) {
+    log.warn('No CSV matches — running diagnostics:');
+    diagnoseMatch(csv.csvData, csv.deleteList, sap.bidRows, log);
+  }
 
   const win = await waitForWindow(sap, store);
   if (win.status === 'expired') { log.warn('Window expired. Waiting next slot...'); await sleep(15000); return { status: 'expired', window: win.window }; }

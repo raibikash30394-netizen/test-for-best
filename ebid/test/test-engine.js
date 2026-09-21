@@ -169,9 +169,18 @@ test('offsetFromHttpDate computes drift', () => {
   assert.equal(off, 5000);
 });
 
-test('resolveWindow prefers plantConf slot times', () => {
+test('resolveWindow computes IST :15/:45 by default (ignores stale plantConf)', () => {
   const plant = { BiddingDate: '/Date(1750000000000)/', SlotStartTime: 'PT10H15M0S', SlotEndTime: 'PT10H30M0S' };
-  const w = tu.resolveWindow(plant, null, 0, [15, 45]);
+  const now = Date.UTC(2026, 5, 15, 9, 3, 0);
+  const w = tu.resolveWindow(plant, null, 0, [15, 45], { source: 'computed' });
+  assert.equal(w.source, 'computed');
+  const istMin = new Date(w.start + 330 * 60000).getUTCMinutes();
+  assert.ok(istMin === 15 || istMin === 45, 'IST min ' + istMin);
+});
+
+test('resolveWindow uses plantConf when source=plantConf', () => {
+  const plant = { BiddingDate: '/Date(1750000000000)/', SlotStartTime: 'PT10H15M0S', SlotEndTime: 'PT10H30M0S' };
+  const w = tu.resolveWindow(plant, null, 0, [15, 45], { source: 'plantConf' });
   assert.equal(w.source, 'plantConf');
   assert.equal(w.start, 1750000000000 + (10 * 3600 + 15 * 60) * 1000);
 });

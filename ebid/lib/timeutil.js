@@ -65,21 +65,33 @@ function nextWindowStartUtc(nowMs, minutes = [15, 45]) {
   return istTarget - IST_OFFSET_MIN * 60000;
 }
 
-// Resolve the active/next slot window. Prefer SAP-provided plantConf slot
-// times (authoritative). Fall back to computed IST :15/:45.
-function resolveWindow(plantConf, currDtDm, offsetMs, windowMinutes) {
-  let start = null, end = null, source = 'plantConf';
+// Resolve the active/next slot window.
+// PRIMARY: compute next IST :15/:45 -> UTC (per requirement; SAP time is GMT and
+// windows are at IST :15/:45, no DST). plantConf slot times are only used to
+// derive the window DURATION when they look sane (or if source='plantConf').
+function resolveWindow(plantConf, currDtDm, offsetMs, windowMinutes, opts = {}) {
+  const source = opts.source || 'computed';
+  const durMin = opts.durationMin || 10;
+  const now = serverNow(offsetMs);
+  const computedStart = nextWindowStartUtc(now, windowMinutes);
+
+  let plantStart = null, plantEnd = null;
   if (plantConf) {
-    start = sapDateTime(plantConf.BiddingDate, plantConf.SlotStartTime);
-    end = sapDateTime(plantConf.BiddingDate, plantConf.SlotEndTime);
+    plantStart = sapDateTime(plantConf.BiddingDate, plantConf.SlotStartTime);
+    plantEnd = sapDateTime(plantConf.BiddingDate, plantConf.SlotEndTime);
   }
-  if (start === null || end === null) {
-    source = 'computed';
-    const now = serverNow(offsetMs);
-    start = nextWindowStartUtc(now, windowMinutes);
-    end = start + 15 * 60000; // assume 15-min window if not given
+
+  if (source === 'plantConf' && plantStart !== null && plantEnd !== null) {
+    return { start: plantStart, end: plantEnd, source: 'plantConf', plantStart, plantEnd, computedStart };
   }
-  return { start, end, source };
+
+  let start = computedStart;
+  let end = start + durMin * 60000;
+  // Borrow duration from plantConf slot delta if it's sane (0 < delta <= 30min).
+  if (plantStart !== null && plantEnd !== null && plantEnd > plantStart && (plantEnd - plantStart) <= 30 * 60000) {
+    end = start + (plantEnd - plantStart);
+  }
+  return { start, end, source: 'computed', plantStart, plantEnd, computedStart };
 }
 
 function fmtCountdown(ms) {
