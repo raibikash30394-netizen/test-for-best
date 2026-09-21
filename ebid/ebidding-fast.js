@@ -135,19 +135,21 @@ function logMatched(matched, submittedKeys, plan, openWindow) {
 async function preWindowMonitor(sap, store, csv, w) {
   const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19);
   let reloggedIn = false, prefetched = null, lastSig = null;
+  let lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
   log.info('Monitoring for orders while window is CLOSED...');
   while (sap.serverNow() < w.start) {
     const remain = w.start - sap.serverNow();
     if (remain <= 60000 && !reloggedIn) { process.stdout.write('\n'); await sap.login(); reloggedIn = true; log.info('Re-logged in (T-60s), session warm'); }
 
-    // Near open: switch to fast captcha polling to detect the real open instant.
+    // Near open: tight captcha polling to catch the open instant + prewarm batch-1.
     if (remain <= cfg.SUBMIT_LEAD_MS) {
       const img = await sap.fetchCaptcha(true);
       if (img) {
         const s = await solver.solve(img, store, cfg, log);
         prefetched = s ? s.result : null;
-        log.ok(`Captcha available — window opening, prewarmed${prefetched ? ' "' + prefetched + '"' : ''}`);
-        return prefetched;
+        process.stdout.write('\n');
+        log.ok(`Captcha prewarmed at T-${remain}ms${prefetched ? ' -> "' + prefetched + '"' : ' (pool-miss)'}`);
+        return { prefetched, matched: lastMatched };
       }
       await sleep(cfg.CAPTCHA_POLL_MS);
       continue;
@@ -155,27 +157,43 @@ async function preWindowMonitor(sap, store, csv, w) {
 
     // Fetch fresh orders, match, keep plan ready, log only when the set changes.
     await sap.fetchOrders();
-    const matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-    const sig = matched.map(m => m.item.SapOrderId).sort().join(',');
+    lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+    const sig = lastMatched.map(m => m.item.SapOrderId).sort().join(',');
     if (sig !== lastSig) {
       process.stdout.write('\n');
-      const plan = planBatches(matched, cfg.MAX_ROWS_PER_BATCH);
-      if (matched.length) logMatched(matched, new Set(), plan, false);
+      const plan = planBatches(lastMatched, cfg.MAX_ROWS_PER_BATCH);
+      if (lastMatched.length) logMatched(lastMatched, new Set(), plan, false);
       else { log.warn('No matching orders yet — diagnostics:'); diagnoseMatch(csv.csvData, csv.deleteList, sap.bidRows, log); }
       lastSig = sig;
     }
-    process.stdout.write(`\r  ⏳ window opens ${ist(w.start)} IST (in ${tu.fmtCountdown(remain)}) | ${matched.length} match ready   `);
-    await sleep(Math.min(remain, cfg.ORDER_POLL_MS_CLOSED));
+    process.stdout.write(`\r  ⏳ window opens ${ist(w.start)} IST (in ${tu.fmtCountdown(remain)}) | ${lastMatched.length} match ready   `);
+    // Never overshoot into the SUBMIT_LEAD window (that's where prewarm happens).
+    const wait = Math.min(cfg.ORDER_POLL_MS_CLOSED, remain - cfg.SUBMIT_LEAD_MS);
+    await sleep(Math.max(50, wait));
   }
   process.stdout.write('\n');
-  return prefetched;
+  return { prefetched, matched: lastMatched };
 }
 
-// ── Phase B: while the window is OPEN (~5 min), keep fetching for NEW orders
-// and submit any not-yet-saved matches immediately (they can arrive late).
-async function windowSubmitLoop(sap, store, csv, w, prefetched) {
+// ── Phase B: at T=0 FIRE the pre-computed plan INSTANTLY (no fetch first, so we
+// beat the 14 vendors), then keep fetching for NEW/late orders and submit them.
+async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched) {
   const submittedKeys = new Set();
-  let firstPass = true, lastSig = null;
+
+  // ⚡ INSTANT FIRE at T=0 using the pre-window plan + prewarmed captcha.
+  if (preMatched && preMatched.length) {
+    // If we prewarmed slightly early, wait for the exact open instant (not before).
+    while (sap.serverNow() < w.start) await sleep(2);
+    const plan = planBatches(preMatched, cfg.MAX_ROWS_PER_BATCH);
+    log.bold(`⚡ T=0 INSTANT FIRE — ${preMatched.length} pre-matched order(s), ${plan.length} batch(es) (no fetch, prewarmed captcha)`);
+    logMatched(preMatched, submittedKeys, plan, true);
+    await submitPlan(sap, store, plan, prefetched, submittedKeys);
+  } else {
+    log.info('No pre-matched orders — will fetch at open.');
+  }
+
+  // Watch for new/late orders for the rest of the window.
+  let lastSig = null;
   while (sap.serverNow() < w.end) {
     if (!await sap.fetchOrders()) { await sleep(cfg.ORDER_POLL_MS_OPEN); continue; }
     const matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
@@ -187,8 +205,7 @@ async function windowSubmitLoop(sap, store, csv, w, prefetched) {
     if (pending.length) {
       const plan = planBatches(pending, cfg.MAX_ROWS_PER_BATCH);
       log.bold(`⚡ ${pending.length} new/pending order(s) -> submitting ${plan.length} batch(es) now`);
-      await submitPlan(sap, store, plan, firstPass ? prefetched : null, submittedKeys);
-      firstPass = false;
+      await submitPlan(sap, store, plan, null, submittedKeys);
     } else {
       const left = w.end - sap.serverNow();
       process.stdout.write(`\r  🟢 window OPEN — watching for new orders (${tu.fmtCountdown(left)} left)   `);
@@ -230,12 +247,16 @@ async function runCycle(sap, store) {
   if (now >= w.end) { log.warn('Window already closed. Waiting for next slot...'); await sleep(2000); return { status: 'expired', window: w }; }
 
   // Phase A — pre-window: keep polling for orders, build plan ready.
-  let prefetched = null;
-  if (sap.serverNow() < w.start) prefetched = await preWindowMonitor(sap, store, csv, w);
+  let prefetched = null, preMatched = matched0;
+  if (sap.serverNow() < w.start) {
+    const pre = await preWindowMonitor(sap, store, csv, w);
+    prefetched = pre.prefetched;
+    preMatched = pre.matched;
+  }
 
-  // Phase B — window OPEN: submit at T=0 and keep submitting late-arriving orders.
-  log.bold('🚀 WINDOW OPEN — firing batches & watching for new orders');
-  const submitted = await windowSubmitLoop(sap, store, csv, w, prefetched);
+  // Phase B — window OPEN: INSTANT fire at T=0, then watch for late orders.
+  log.bold('🚀 WINDOW OPEN — instant fire + watching for new orders');
+  const submitted = await windowSubmitLoop(sap, store, csv, w, prefetched, preMatched);
   log.bold(`Window done — ${submitted.size} order-unit(s) submitted this slot`);
 
   flushDeferred(store, csv);
