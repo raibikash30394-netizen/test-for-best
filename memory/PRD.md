@@ -62,8 +62,10 @@ pool, strict batching/priority rules, submit before 14 vendors.
   before open so instant-fire hits true T=0.
 
 ## Backlog / next
-- P1: (optional) experiment CAPTCHA_PREFETCH_MS on live windows.
-- P2: handle "Same amount has been bid by other vendor" (bid-amount conflict strategy).
-- P2: persist CSV bid auto-fixes to disk (currently in-memory + logged).
+- P1: Deploy latest build on Mumbai box (old build was still running in last window).
+- DONE: "Same amount bid by other vendor" now treated as SAVED (no wasteful resubmit);
+  amount is a HARD limit from CSV — auto-adjust disabled (AUTO_UPDATE_CSV_BIDS=false).
+  Winner is decided by SPEED, not amount.
+- P2: (optional) experiment CAPTCHA_PREFETCH_MS=100/200 on live windows for extra speed.
 - P3 (optional): small React+FastAPI live status/log dashboard.
 - P3: replace NODE_TLS_REJECT_UNAUTHORIZED=0 with a proper CA cert.

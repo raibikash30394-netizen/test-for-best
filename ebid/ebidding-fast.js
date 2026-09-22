@@ -65,6 +65,14 @@ async function submitBatch(sap, store, rows, captcha, batchNo) {
     }
     const msg = (res.message || '').toLowerCase();
 
+    // "Same amount has been bid by other vendor" => your bid IS saved (just a tie
+    // notice). Winner is decided by SPEED, not amount, so treat as SUCCESS and do
+    // NOT resubmit (resubmitting only wastes precious time).
+    if (msg.includes('same amount has been bid')) {
+      log.ok(`✅ batch ${batchNo} SAVED (tie: same amount as other vendor(s) — fastest wins)`);
+      return { ok: true, res };
+    }
+
     // Hard captcha lock: SAP blocks after repeated failures. Do NOT hammer —
     // bail out and let the window watch-loop retry on the next poll (breather).
     if (msg.includes('contact administrator') || msg.includes('captcha validation failed')) {

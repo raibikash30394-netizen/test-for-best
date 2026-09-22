@@ -17,7 +17,7 @@ PLANT=6924
 CSV_FILE=./files/input2.csv
 DELETE_CSV_FILE=./files/delete.csv
 RANK_CSV_FILE=./files/rank_records.csv
-AUTO_UPDATE_CSV_BIDS=true
+AUTO_UPDATE_CSV_BIDS=false
 
 # ─── Captcha (162-image pool; koi external solver nahi) ─
 CAPTCHA_DATA_FILE=./data.json

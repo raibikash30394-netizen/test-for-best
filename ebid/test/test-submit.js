@@ -81,6 +81,14 @@ function makeSap(events, submitBehavior) {
     assert.ok(keys.has('u1') && keys.has('u2'));
   });
 
+  await test('"Same amount bid by other vendor" is treated as SAVED (no resubmit)', async () => {
+    const events = [];
+    const sap = makeSap(events, () => ({ type: 'E', message: 'Same amount has been bid by other vendor for order  id : 5577213868 and posnr: 11' }));
+    const r = await submitBatch(sap, store, [{ item: { SapOrderId: '1' }, bidAmount: '100' }], 'CAP', 1);
+    assert.equal(r.ok, true, 'tie notice must be success');
+    assert.equal(events.filter(e => e === 'submit').length, 1, 'must NOT resubmit on tie, got ' + JSON.stringify(events));
+  });
+
   console.log('\n──────────────────────────────');
   console.log(`  ${pass} passed, ${fail} failed`);
   console.log('──────────────────────────────\n');

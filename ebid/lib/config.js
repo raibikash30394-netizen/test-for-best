@@ -25,7 +25,7 @@ const CONFIG = {
   CSV_FILE: process.env.CSV_FILE || './files/input2.csv',
   DELETE_CSV_FILE: process.env.DELETE_CSV_FILE || './files/delete.csv',
   RANK_CSV_FILE: process.env.RANK_CSV_FILE || './files/rank_records.csv',
-  AUTO_UPDATE_CSV_BIDS: bool(process.env.AUTO_UPDATE_CSV_BIDS, true),
+  AUTO_UPDATE_CSV_BIDS: bool(process.env.AUTO_UPDATE_CSV_BIDS, false), // amount is a HARD limit from CSV — never auto-change it
 
   // Captcha
   CAPTCHA_DATA_FILE: process.env.CAPTCHA_DATA_FILE || './data.json',
