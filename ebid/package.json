@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node ebidding-fast.js",
     "dry": "DRY_RUN=true node ebidding-fast.js",
-    "test": "node test/test-engine.js",
+    "test": "node test/test-engine.js && node test/test-submit.js",
     "harness": "node test-harness.js"
   },
   "dependencies": {
