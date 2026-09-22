@@ -75,7 +75,7 @@ async function submitBatch(sap, store, rows, captcha, batchNo) {
     if (res.type === 'I') {
       captchaTries++;
       if (captchaTries > cfg.CAPTCHA_MAX_RETRY) {
-        log.err(`batch ${batchNo}: captcha rejected ${captchaTries}x — giving up (retry next poll)`);
+        log.err(`batch ${batchNo}: captcha rejected — gave up after ${cfg.CAPTCHA_MAX_RETRY} retries (will retry next poll)`);
         return { ok: false, res };
       }
       log.warn(`batch ${batchNo}: captcha rejected (${captchaTries}/${cfg.CAPTCHA_MAX_RETRY}), refetching...`);

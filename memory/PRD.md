@@ -41,14 +41,29 @@ pool, strict batching/priority rules, submit before 14 vendors.
 - `test/test-engine.js` 19 offline unit tests.
 
 ## Status (2026-06)
-- ✅ Engine + captcha store + time math: 19/19 unit tests pass.
+- ✅ Engine + captcha store + time math: 20/20 unit tests pass.
+- ✅ Submit path (mock SAP): 6/6 tests — SEQUENTIAL captcha verified.
 - ✅ Daemon boots, loads pool/CSV, wiring validated; SAP calls identical to original.
-- ⏳ Live e2e NOT verifiable from this container (WAF 406 blocks non-Mumbai IP).
-  Must be run/verified on the user's AWS Mumbai box or the promised real test window.
+- ✅ LIVE VERIFIED on user's Mumbai box: window timing correct (IST :15/:45), T=0 instant
+  fire ~372ms, priority (1164-first) correct, multiple orders saved across a window.
+
+## Live-tested findings & fixes (from user's real windows)
+- Captcha "bug" PROVEN: SAP REJECTS pre-window (prefetched) captchas — only the
+  captcha issued after open is valid. Added `CAPTCHA_PREFETCH_MS` (default 0 = fetch
+  fresh at T=0); user can experiment with 200/300/500.
+- Window timing bug: old code trusted plantConf slot (gave 22:15 UTC vs 22:15 IST).
+  Now computes IST :15/:45 -> UTC (WINDOW_SOURCE=computed default).
+- Captcha clobber bug: parallel pipeline fetched batch N+1's captcha while batch N was
+  submitting -> SAP (one captcha per session) rejected -> "Captcha Validation Failed.
+  Please Contact Administrator." Fixed: submitPlan is now STRICTLY SEQUENTIAL.
+  Added CAPTCHA_MAX_RETRY (3) + hard-lock backoff (no retry storm).
+- Continuous polling: fetch+match+plan while window CLOSED; keep fetching for NEW/late
+  orders while OPEN and submit them immediately. Pre-window heavy fetch stops ~2.5s
+  before open so instant-fire hits true T=0.
 
 ## Backlog / next
-- P1: Run `TEST=A`/`TEST=B` harness on real window → decide pre-solve & static-reuse.
-- P2: If Test B confirms concurrency-safe, raise MAX_PARALLEL_BATCHES.
-- P2: Persist CSV bid auto-fixes to disk (currently in-memory + logged).
+- P1: (optional) experiment CAPTCHA_PREFETCH_MS on live windows.
+- P2: handle "Same amount has been bid by other vendor" (bid-amount conflict strategy).
+- P2: persist CSV bid auto-fixes to disk (currently in-memory + logged).
 - P3 (optional): small React+FastAPI live status/log dashboard.
 - P3: replace NODE_TLS_REJECT_UNAUTHORIZED=0 with a proper CA cert.
