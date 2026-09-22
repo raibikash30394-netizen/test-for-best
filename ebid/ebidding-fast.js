@@ -134,28 +134,31 @@ function logMatched(matched, submittedKeys, plan, openWindow) {
 // captcha endpoint to catch the exact moment SAP opens and prewarm batch-1.
 async function preWindowMonitor(sap, store, csv, w) {
   const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19);
+  const lead = cfg.CAPTCHA_PREFETCH_MS;   // 0 = don't prewarm; fetch captcha at T=0 (recommended)
+  const spin = Math.max(lead, 250);        // last window we spin tightly to hit T=0 precisely
   let reloggedIn = false, prefetched = null, lastSig = null;
   let lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-  log.info('Monitoring for orders while window is CLOSED...');
+  log.info(`Monitoring for orders while window is CLOSED... (captcha prefetch: ${lead ? lead + 'ms before open' : 'OFF — fetch at T=0'})`);
   while (sap.serverNow() < w.start) {
     const remain = w.start - sap.serverNow();
     if (remain <= 60000 && !reloggedIn) { process.stdout.write('\n'); await sap.login(); reloggedIn = true; log.info('Re-logged in (T-60s), session warm'); }
 
-    // Near open: tight captcha polling to catch the open instant + prewarm batch-1.
-    if (remain <= cfg.SUBMIT_LEAD_MS) {
+    // Prewarm captcha at the configured lead (only if enabled). NOTE: SAP has
+    // been observed to REJECT pre-window captchas — keep lead=0 unless testing.
+    if (lead > 0 && remain <= lead && !prefetched) {
       const img = await sap.fetchCaptcha(true);
       if (img) {
         const s = await solver.solve(img, store, cfg, log);
         prefetched = s ? s.result : null;
         process.stdout.write('\n');
-        log.ok(`Captcha prewarmed at T-${remain}ms${prefetched ? ' -> "' + prefetched + '"' : ' (pool-miss)'}`);
-        return { prefetched, matched: lastMatched };
+        log.ok(`Captcha prefetched at T-${remain}ms${prefetched ? ' -> "' + prefetched + '"' : ' (pool-miss)'}`);
       }
-      await sleep(cfg.CAPTCHA_POLL_MS);
-      continue;
     }
 
-    // Fetch fresh orders, match, keep plan ready, log only when the set changes.
+    // In the final `spin` window, poll tightly (no order fetch) so we exit exactly at T=0.
+    if (remain <= spin) { await sleep(cfg.CAPTCHA_POLL_MS); continue; }
+
+    // Otherwise: fetch fresh orders, match, keep plan ready, log on change.
     await sap.fetchOrders();
     lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
     const sig = lastMatched.map(m => m.item.SapOrderId).sort().join(',');
@@ -167,8 +170,7 @@ async function preWindowMonitor(sap, store, csv, w) {
       lastSig = sig;
     }
     process.stdout.write(`\r  ⏳ window opens ${ist(w.start)} IST (in ${tu.fmtCountdown(remain)}) | ${lastMatched.length} match ready   `);
-    // Never overshoot into the SUBMIT_LEAD window (that's where prewarm happens).
-    const wait = Math.min(cfg.ORDER_POLL_MS_CLOSED, remain - cfg.SUBMIT_LEAD_MS);
+    const wait = Math.min(cfg.ORDER_POLL_MS_CLOSED, remain - spin);
     await sleep(Math.max(50, wait));
   }
   process.stdout.write('\n');
@@ -185,7 +187,8 @@ async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched) {
     // If we prewarmed slightly early, wait for the exact open instant (not before).
     while (sap.serverNow() < w.start) await sleep(2);
     const plan = planBatches(preMatched, cfg.MAX_ROWS_PER_BATCH);
-    log.bold(`⚡ T=0 INSTANT FIRE — ${preMatched.length} pre-matched order(s), ${plan.length} batch(es) (no fetch, prewarmed captcha)`);
+    const capMode = prefetched ? 'prefetched captcha' : 'fetch captcha now (fresh at open)';
+    log.bold(`⚡ T=0 INSTANT FIRE — ${preMatched.length} pre-matched order(s), ${plan.length} batch(es) [${capMode}]`);
     logMatched(preMatched, submittedKeys, plan, true);
     await submitPlan(sap, store, plan, prefetched, submittedKeys);
   } else {

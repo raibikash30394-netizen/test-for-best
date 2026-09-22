@@ -37,7 +37,8 @@ const CONFIG = {
 
   // Timing (all ms unless noted)
   PREWARM_LEAD_MS: int(process.env.PREWARM_LEAD_MS, 90000), // start warming this early
-  SUBMIT_LEAD_MS: int(process.env.SUBMIT_LEAD_MS, 500),     // begin captcha poll this early
+  SUBMIT_LEAD_MS: int(process.env.SUBMIT_LEAD_MS, 500),     // (legacy) begin captcha poll this early
+  CAPTCHA_PREFETCH_MS: int(process.env.CAPTCHA_PREFETCH_MS, 0), // fetch captcha this many ms BEFORE open; 0 = fetch at T=0 (SAP rejects pre-window captchas)
   CAPTCHA_POLL_MS: int(process.env.CAPTCHA_POLL_MS, 10),    // poll interval while window opens
   RETRY_GAP_MS: int(process.env.RETRY_GAP_MS, 20),          // tight adaptive retry gap
   ORDER_POLL_MS_CLOSED: int(process.env.ORDER_POLL_MS_CLOSED, 5000), // fetch new orders while window CLOSED

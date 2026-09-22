@@ -35,6 +35,10 @@ WINDOW_DURATION_MIN=10
 # ─── Speed knobs (ms) ───────────────────────
 PREWARM_LEAD_MS=90000
 SUBMIT_LEAD_MS=500
+# Captcha ko window khulne se kitne ms PEHLE fetch karna hai.
+#   0    = prefetch band; window khulte hi (T=0) fresh captcha le ke submit (SAP pre-window captcha reject karta hai -> yahi recommended)
+#   200/300/500 = test karne ke liye; agar accept ho to fast, warna 0 kar do
+CAPTCHA_PREFETCH_MS=0
 CAPTCHA_POLL_MS=10
 RETRY_GAP_MS=20
 ORDER_POLL_MS_CLOSED=5000
