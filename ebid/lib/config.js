@@ -38,10 +38,10 @@ const CONFIG = {
   // Timing (all ms unless noted)
   PREWARM_LEAD_MS: int(process.env.PREWARM_LEAD_MS, 90000), // start warming this early
   SUBMIT_LEAD_MS: int(process.env.SUBMIT_LEAD_MS, 0),      // fire submit this many ms BEFORE open (only when captcha prefetched); 0 = fire exactly at T=0
-  CAPTCHA_PREFETCH_MS: int(process.env.CAPTCHA_PREFETCH_MS, 50), // fetch captcha this many ms BEFORE open; 50 = proven sweet spot; 0 = fetch at T=0
+  CAPTCHA_PREFETCH_MS: int(process.env.CAPTCHA_PREFETCH_MS, 0), // 0 = POLLING mode (fetch fresh captcha at open, recommended). >0 = prefetch that many ms early
   CAPTCHA_POLL_MS: int(process.env.CAPTCHA_POLL_MS, 10),    // poll interval while window opens
-  CAPTCHA_MAX_RETRY: int(process.env.CAPTCHA_MAX_RETRY, 3),  // max captcha refetch/retries per batch before backing off
-  RETRY_GAP_MS: int(process.env.RETRY_GAP_MS, 20),          // tight adaptive retry gap
+  CAPTCHA_MAX_RETRY: int(process.env.CAPTCHA_MAX_RETRY, 8),  // captcha poll attempts per batch before waiting for next window poll
+  RETRY_GAP_MS: int(process.env.RETRY_GAP_MS, 150),          // gap between captcha poll attempts (lets SAP issue a fresh captcha)
   ORDER_POLL_MS_CLOSED: int(process.env.ORDER_POLL_MS_CLOSED, 5000), // fetch new orders while window CLOSED
   ORDER_POLL_MS_OPEN: int(process.env.ORDER_POLL_MS_OPEN, 600),      // fetch new orders while window OPEN
   WINDOW_MINUTES: mins(process.env.WINDOW_MINUTES, [15, 45]),

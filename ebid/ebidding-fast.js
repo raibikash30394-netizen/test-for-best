@@ -56,7 +56,7 @@ function applyBidAmounts(matched) {
 async function submitBatch(sap, store, rows, captcha, batchNo) {
   let cap = captcha;
   let captchaTries = 0;
-  for (let attempt = 1; attempt <= 10; attempt++) {
+  for (let attempt = 1; attempt <= cfg.CAPTCHA_MAX_RETRY + 2; attempt++) {
     const res = await sap.submit(rows, cap, cfg.DRY_RUN);
     if (res.type === 'DRY') { log.warn(`[DRY] batch ${batchNo}: would submit ${res.rows} rows`); return { ok: true, res }; }
     if (res.type === 'S' || res.type === 'N') {
@@ -66,30 +66,27 @@ async function submitBatch(sap, store, rows, captcha, batchNo) {
     const msg = (res.message || '').toLowerCase();
 
     // TIE = your bid IS saved (covers "Same amount…" and "Same Avg amount…").
-    // Winner decided by SPEED not amount -> SUCCESS, do NOT resubmit.
     if (msg.includes('amount has been bid by other vendor')) {
       log.ok(`✅ batch ${batchNo} SAVED (tie: same amount as other vendor(s) — fastest wins)`);
       return { ok: true, res };
     }
 
-    // HARD lock only when SAP explicitly says "Contact Administrator" — back off.
-    if (msg.includes('contact administrator')) {
-      log.err(`batch ${batchNo}: SAP captcha lock ("${res.message}") — backing off, retry next poll`);
-      return { ok: false, res, retryable: true };
-    }
-
-    // WRONG captcha (incl. "Captcha Validation Failed. Worng Captcha Value") ->
-    // retry INSTANTLY with a fresh captcha (not a lock).
-    const wrongCaptcha = res.type === 'I' || msg.includes('captcha validation failed') ||
-      msg.includes('wrong captcha') || msg.includes('worng captcha');
-    if (wrongCaptcha) {
+    // POLLING: any captcha-not-accepted response (wrong value, validation failed,
+    // or the transient "Contact Administrator" lock) => fetch a FRESH captcha and
+    // re-submit. The first captcha at open is often rejected; a fresh one moments
+    // later works, so we keep polling until SAP accepts.
+    const hardLock = msg.includes('contact administrator');
+    const captchaNotAccepted = res.type === 'I' || hardLock ||
+      msg.includes('captcha validation failed') || msg.includes('wrong captcha') || msg.includes('worng captcha');
+    if (captchaNotAccepted) {
       captchaTries++;
       if (captchaTries > cfg.CAPTCHA_MAX_RETRY) {
-        log.err(`batch ${batchNo}: wrong captcha — gave up after ${cfg.CAPTCHA_MAX_RETRY} retries (retry next poll)`);
+        log.err(`batch ${batchNo}: captcha not accepted after ${cfg.CAPTCHA_MAX_RETRY} polls — will retry next window poll`);
         return { ok: false, res, retryable: true };
       }
-      log.warn(`batch ${batchNo}: wrong captcha (${captchaTries}/${cfg.CAPTCHA_MAX_RETRY}), refetching...`);
-      await sleep(cfg.RETRY_GAP_MS);
+      const gap = hardLock ? Math.max(cfg.RETRY_GAP_MS, 1200) : cfg.RETRY_GAP_MS;
+      log.warn(`batch ${batchNo}: captcha not accepted (poll ${captchaTries}/${cfg.CAPTCHA_MAX_RETRY})${hardLock ? ' [lock, waiting]' : ''} — re-polling fresh captcha...`);
+      await sleep(gap);
       cap = await solver.fetchAndSolve(sap, store, cfg, log, 3);
       if (!cap) return { ok: false, res: { type: 'E', message: 'no captcha on retry' }, retryable: true };
       continue;

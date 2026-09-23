@@ -1,4 +1,7 @@
 'use strict';
+// Keep captcha polls fast + bounded for tests (override before config loads).
+process.env.CAPTCHA_MAX_RETRY = '2';
+process.env.RETRY_GAP_MS = '5';
 // Mock-based tests for the submit path (no SAP/network). Proves:
 //  1) captcha for batch N+1 is fetched only AFTER batch N is submitted (sequential)
 //  2) hard captcha lock ("Contact Administrator") backs off without hammering
@@ -56,12 +59,13 @@ function makeSap(events, submitBehavior) {
     assert.deepEqual(events, ['submit'], 'batch1 should NOT fetch when prefetched, got ' + JSON.stringify(events));
   });
 
-  await test('hard captcha lock backs off (only ONE submit, no hammer)', async () => {
+  await test('hard lock ("Contact Administrator") re-polls then gives up (retryable)', async () => {
     const events = [];
     const sap = makeSap(events, () => ({ type: 'E', message: 'Captcha Validation Failed. Please Contact Administrator.' }));
     const r = await submitBatch(sap, store, [{ item: { SapOrderId: '1' }, bidAmount: '100' }], 'CAP', 1);
     assert.equal(r.ok, false);
-    assert.equal(events.filter(e => e === 'submit').length, 1, 'must NOT hammer on lock, got ' + JSON.stringify(events));
+    assert.equal(r.retryable, true, 'lock must be retryable (window watch-loop retries)');
+    assert.ok(events.filter(e => e === 'submit').length >= 2, 'lock should re-poll, got ' + JSON.stringify(events));
   });
 
   await test('type I rejects retry up to CAPTCHA_MAX_RETRY then give up', async () => {

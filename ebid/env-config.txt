@@ -34,18 +34,18 @@ WINDOW_DURATION_MIN=10
 
 # ─── Speed knobs (ms) ───────────────────────
 PREWARM_LEAD_MS=90000
-# Submit ko window khulne se kitne ms PEHLE fire karna (sirf jab captcha prefetch hua ho).
-#   0 = exactly T=0 pe. 20-40 rakh ke dekho -> request thik open pe land kare (rank 1 chance zyada).
-#   Note: SUBMIT_LEAD_MS, CAPTCHA_PREFETCH_MS se kam hona chahiye.
+# Submit ko window khulne se kitne ms PEHLE fire karna (sirf jab captcha prefetch hua ho). 0 = T=0 pe.
 SUBMIT_LEAD_MS=0
-# Captcha ko window khulne se kitne ms PEHLE fetch karna hai.
-#   50 = PROVEN sweet spot (aapke test me 0 fails). 0 = window khulte hi fetch.
-#   60/100 = fail (bahut jaldi -> SAP wrong captcha; ab auto instant-retry karega)
-CAPTCHA_PREFETCH_MS=50
+# Captcha strategy:
+#   0  = POLLING mode (recommended) -> window khulte hi fresh captcha, valid na mile to
+#        turant naya captcha le ke retry (jab tak SAP accept na kare). Clock exact match ki zaroorat nahi.
+#   50 = prefetch mode (window se 50ms pehle) — kabhi kabhi "wrong captcha" de sakta hai.
+CAPTCHA_PREFETCH_MS=0
 CAPTCHA_POLL_MS=10
-RETRY_GAP_MS=20
-# Ek batch pe max kitni baar wrong-captcha retry (uske baad next poll pe try)
-CAPTCHA_MAX_RETRY=3
+# Captcha poll ke beech gap (SAP ko fresh captcha banane ka time). 150ms theek hai.
+RETRY_GAP_MS=150
+# Ek batch pe max kitni baar captcha poll (uske baad next window-poll pe try)
+CAPTCHA_MAX_RETRY=8
 ORDER_POLL_MS_CLOSED=5000
 ORDER_POLL_MS_OPEN=600
 
