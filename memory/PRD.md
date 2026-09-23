@@ -62,10 +62,13 @@ pool, strict batching/priority rules, submit before 14 vendors.
   before open so instant-fire hits true T=0.
 
 ## Backlog / next
-- P1: Deploy latest build on Mumbai box (old build was still running in last window).
-- DONE: "Same amount bid by other vendor" now treated as SAVED (no wasteful resubmit);
-  amount is a HARD limit from CSV — auto-adjust disabled (AUTO_UPDATE_CSV_BIDS=false).
-  Winner is decided by SPEED, not amount.
-- P2: (optional) experiment CAPTCHA_PREFETCH_MS=100/200 on live windows for extra speed.
-- P3 (optional): small React+FastAPI live status/log dashboard.
+- DONE: tie messages ("Same amount"/"Same Avg amount") = SAVED (no resubmit).
+- DONE: terminal business rejections ("Reduce your bid by Rs X") = skip for the window
+  (failedKeys) — no more infinite retry loop.
+- DONE: "Wrong Captcha Value" = instant retry (not hard-lock); only "Contact Administrator"
+  backs off. CAPTCHA_PREFETCH_MS default 50 (proven), SUBMIT_LEAD_MS repurposed as
+  early-fire lead (default 0).
+- P2: SAP sub-second clock sync (HTTP Date header is 1s-resolution; 50ms prefetch already
+  compensates empirically).
+- P3 (optional): React+FastAPI live status/log dashboard.
 - P3: replace NODE_TLS_REJECT_UNAUTHORIZED=0 with a proper CA cert.
