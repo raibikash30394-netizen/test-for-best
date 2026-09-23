@@ -62,13 +62,13 @@ pool, strict batching/priority rules, submit before 14 vendors.
   before open so instant-fire hits true T=0.
 
 ## Backlog / next
-- DONE: tie messages ("Same amount"/"Same Avg amount") = SAVED (no resubmit).
-- DONE: terminal business rejections ("Reduce your bid by Rs X") = skip for the window
-  (failedKeys) — no more infinite retry loop.
-- DONE: "Wrong Captcha Value" = instant retry (not hard-lock); only "Contact Administrator"
-  backs off. CAPTCHA_PREFETCH_MS default 50 (proven), SUBMIT_LEAD_MS repurposed as
-  early-fire lead (default 0).
-- P2: SAP sub-second clock sync (HTTP Date header is 1s-resolution; 50ms prefetch already
-  compensates empirically).
-- P3 (optional): React+FastAPI live status/log dashboard.
-- P3: replace NODE_TLS_REJECT_UNAUTHORIZED=0 with a proper CA cert.
+- DONE: CAPTCHA-POLLING mode (default CAPTCHA_PREFETCH_MS=0). At open, fetch fresh
+  captcha, submit, and on ANY captcha-not-accepted (wrong value / validation failed /
+  transient "Contact Administrator") re-poll a fresh captcha until SAP accepts
+  (CAPTCHA_MAX_RETRY=8, RETRY_GAP_MS=150). Robust to ±1s clock imprecision — no exact
+  clock alignment needed.
+- DONE: tie ("Same amount"/"Same Avg amount") = SAVED; "Reduce your bid by Rs X" = terminal
+  skip (failedKeys, no infinite loop); sequential captcha.
+- P3: SAP sub-second time via 404 error-XML <timestamp> (server-local/IST) — only if user
+  still wants after polling; polling already removes the need.
+- P3 (optional): React+FastAPI live status dashboard.
