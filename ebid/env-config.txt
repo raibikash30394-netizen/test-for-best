@@ -49,10 +49,13 @@ CAPTCHA_MAX_RETRY=8
 ORDER_POLL_MS_CLOSED=5000
 ORDER_POLL_MS_OPEN=600
 
-# Window-open trigger: T-5s pe fast polling shuru, SAP slot flip hote hi INSTANT fire
+# Window-open trigger: SAP captcha unlock = window open. T-5s se captcha poll,
+# unlock hote hi INSTANT submit. T-2s pe matched orders freeze ho jaate hain.
 WINDOW_DETECT_LEAD_MS=5000
-# Slot-flip check ke beech gap (10ms = flat-out, network jitni de utni tez)
+# Captcha-unlock probe ke beech gap (10ms = flat-out, network jitni de utni tez)
 WINDOW_DETECT_POLL_MS=10
+# Open se kitne ms pehle matched orders FREEZE karein (yahi submit honge)
+FREEZE_LEAD_MS=2000
 
 # ─── Modes ──────────────────────────────────
 LOOP_CONTINUOUS=true

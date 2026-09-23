@@ -62,15 +62,17 @@ pool, strict batching/priority rules, submit before 14 vendors.
   before open so instant-fire hits true T=0.
 
 ## Backlog / next
-- DONE (2026-06): SLOT-FLIP WINDOW-OPEN TRIGGER. In the final WINDOW_DETECT_LEAD_MS
-  (default 5000ms) before computed open, bot polls SAP flat-out every
-  WINDOW_DETECT_POLL_MS (default 10ms) and FIRES the instant plantConf's slot
-  fingerprint (SlotNumber|SlotStartTime) changes = true server-side "window open".
-  On flip -> openNow=true -> windowSubmitLoop fires with ZERO clock wait (fetch fresh
-  captcha immediately). Per user: NO local-clock fallback — waits strictly for the flip
-  (safety bail only if whole window elapses). Fixes the earlier ~5.5s delay where firing
-  at local T=0 hit SAP before its real open -> 2 captcha rejects. Files:
-  preWindowMonitor + windowSubmitLoop in ebidding-fast.js, config.js keys added.
+- DONE (2026-06): WINDOW-OPEN = CAPTCHA-UNLOCK detection (ported from user's
+  ebidding-automation.js reference). SAP issues a captcha ONLY when the window
+  unlocks (locked => fetchCaptcha returns null). Bot polls fetchCaptcha every
+  WINDOW_DETECT_POLL_MS (10ms) starting WINDOW_DETECT_LEAD_MS (5s) before open;
+  the FIRST solvable captcha = window OPEN, and that same fresh captcha is used to
+  submit instantly (openNow + prefetched -> windowSubmitLoop fires with ZERO wait).
+  Matched orders are FROZEN at FREEZE_LEAD_MS (2000) before open and those frozen
+  rows are what get submitted. NOTE: the earlier slot-flip approach FAILED —
+  plantConf SlotNumber|SlotStartTime never changes at open (stayed S40|PT19H45M00S
+  through T+28s), so it was replaced.
+- DONE (2026-06): (superseded) slot-flip trigger — removed, did not work.
 - DONE: CAPTCHA-POLLING mode (default CAPTCHA_PREFETCH_MS=0). At open, fetch fresh
   captcha, submit, and on ANY captcha-not-accepted (wrong value / validation failed /
   transient "Contact Administrator") re-poll a fresh captcha until SAP accepts

@@ -140,39 +140,24 @@ function logMatched(matched, submittedKeys, plan, openWindow) {
   if (plan) log.info(`   → ${plan.length} batch(es) planned (order: 1164 → singles → clubs)`);
 }
 
-// ── Phase A: pre-window monitor. Keep fetching orders while the window is
-// CLOSED, match + build the batch plan ready, log matches. Near open, poll the
-// captcha endpoint to catch the exact moment SAP opens and prewarm batch-1.
-// Composite slot key — the true server-side "window open" fingerprint. When SAP
-// flips to the new bidding slot, either SlotNumber or SlotStartTime changes.
-function slotKey(sap) {
-  const pc = sap.plantConf;
-  return pc ? `${pc.SlotNumber}|${pc.SlotStartTime}` : 'none';
-}
-
+// ── Phase A: pre-window monitor. Fetch+match orders while window CLOSED. At
+// T-FREEZE_LEAD_MS, FREEZE the matched orders (final snapshot). Then detect the
+// exact window-OPEN moment via CAPTCHA-UNLOCK polling: SAP only issues a captcha
+// once the window unlocks (locked = fetchCaptcha returns null). The first captcha
+// we can solve IS the fresh valid one — we hand it off and submit instantly.
 async function preWindowMonitor(sap, store, csv, w) {
   const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19);
-  const lead = cfg.CAPTCHA_PREFETCH_MS;         // 0 = don't prewarm (recommended)
-  const detectLead = cfg.WINDOW_DETECT_LEAD_MS; // start fast slot-flip polling this early
-  let reloggedIn = false, prefetched = null, lastSig = null;
+  const detectLead = cfg.WINDOW_DETECT_LEAD_MS; // start captcha-unlock polling this early
+  const freezeLead = cfg.FREEZE_LEAD_MS;        // freeze matched orders this many ms before open
+  const pollGap = cfg.WINDOW_DETECT_POLL_MS;    // gap between unlock probes
+  let reloggedIn = false, lastSig = null;
   let lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-  log.info(`Monitoring orders while window CLOSED... (slot-flip detect: T-${detectLead}ms @ every ${cfg.WINDOW_DETECT_POLL_MS}ms)`);
+  log.info(`Monitoring orders while window CLOSED... (unlock-detect: T-${detectLead}ms @ ${pollGap}ms | freeze: T-${freezeLead}ms)`);
 
   // ── Phase A1: relaxed monitoring until T-detectLead ──────────────────────
   while (sap.serverNow() < w.start - detectLead) {
     const remain = w.start - sap.serverNow();
     if (remain <= 60000 && !reloggedIn) { process.stdout.write('\n'); await sap.login(); reloggedIn = true; log.info('Re-logged in (T-60s), session warm'); }
-
-    // Optional captcha prewarm (default OFF; SAP rejects pre-window captchas).
-    if (lead > 0 && remain <= lead && !prefetched) {
-      const img = await sap.fetchCaptcha(true);
-      if (img) {
-        const s = await solver.solve(img, store, cfg, log);
-        prefetched = s ? s.result : null;
-        process.stdout.write('\n');
-        log.ok(`Captcha prefetched at T-${remain}ms${prefetched ? ' -> "' + prefetched + '"' : ' (pool-miss)'}`);
-      }
-    }
 
     await sap.fetchOrders();
     lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
@@ -189,34 +174,52 @@ async function preWindowMonitor(sap, store, csv, w) {
     await sleep(Math.max(50, wait));
   }
 
-  // ── Phase A2: FAST slot-flip detection — fire the instant SAP opens ──────
-  // Baseline = the slot SAP reports while still CLOSED. We poll flat-out and the
-  // moment the slot changes we return openNow=true so Phase B fires immediately.
-  // Per requirement: NO local-clock fallback — we wait strictly for the flip.
-  const baseline = slotKey(sap);
+  // ── Phase A2: FREEZE orders (T-freezeLead) + CAPTCHA-UNLOCK detection ─────
+  // SAP hands out a captcha ONLY when the window is open. So we poll it flat-out;
+  // the first captcha we can solve = window OPEN → return it so Phase B submits
+  // the FROZEN batch instantly with that fresh captcha. No local-clock fallback.
   process.stdout.write('\n');
-  log.bold(`🔎 Slot-flip watch armed (baseline slot=${baseline}) — will FIRE the instant SAP opens`);
-  while (true) {
-    if (await sap.fetchOrders()) {
-      lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-      const cur = slotKey(sap);
-      if (cur !== 'none' && cur !== baseline) {
-        process.stdout.write('\n');
-        log.ok(`🎯 SLOT FLIP (${baseline} → ${cur}) — WINDOW OPEN, firing instantly`);
-        return { prefetched, matched: lastMatched, openNow: true };
-      }
-      const remain = w.start - sap.serverNow();
-      const clk = remain > 0 ? 'T-' + tu.fmtCountdown(remain) : 'T+' + tu.fmtCountdown(-remain);
-      process.stdout.write(`\r  🔎 waiting for slot flip (clock ${clk}) baseline=${baseline} | ${lastMatched.length} ready   `);
-    }
-    // Safety net: if the whole window elapsed without a flip, stop waiting.
-    if (sap.serverNow() >= w.end) {
+  log.bold(`🔓 Unlock-detect armed — polling SAP captcha @ ${pollGap}ms | orders freeze at T-${freezeLead}ms`);
+  let frozen = null, lastOrderFetch = 0;
+  while (sap.serverNow() < w.end) {
+    const remain = w.start - sap.serverNow();
+
+    // Freeze the matched orders once, freezeLead ms before open.
+    if (!frozen && remain <= freezeLead) {
+      await sap.fetchOrders();
+      frozen = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+      lastMatched = frozen;
       process.stdout.write('\n');
-      log.warn('Window end passed without a slot flip — no fire this slot.');
-      return { prefetched, matched: lastMatched, openNow: false };
+      log.ok(`❄  Orders FROZEN (${frozen.length} matched) — will submit these the instant window unlocks`);
+    } else if (!frozen && Date.now() - lastOrderFetch > 400) {
+      // Pre-freeze: keep the ready-queue fresh (light, throttled).
+      await sap.fetchOrders();
+      lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+      lastOrderFetch = Date.now();
     }
-    await sleep(cfg.WINDOW_DETECT_POLL_MS);
+
+    // UNLOCK PROBE: image => window OPEN. null => still locked.
+    const img = await sap.fetchCaptcha(true);
+    if (img) {
+      const s = await solver.solve(img, store, cfg, log);
+      if (s) {
+        const matched = frozen || lastMatched;
+        process.stdout.write('\n');
+        log.ok(`🔓 Captcha UNLOCKED — WINDOW OPEN, firing instantly (captcha "${s.result}")`);
+        return { prefetched: s.result, matched, openNow: true };
+      }
+      // Pool-miss on this captcha: it's already unlocked, just grab a fresh one.
+      await sleep(pollGap);
+      continue;
+    }
+    const clk = remain > 0 ? 'T-' + tu.fmtCountdown(remain) : 'T+' + tu.fmtCountdown(-remain);
+    process.stdout.write(`\r  🔎 waiting for window unlock (captcha locked) ${clk} | ${(frozen || lastMatched).length} ready   `);
+    await sleep(pollGap);
   }
+
+  process.stdout.write('\n');
+  log.warn('Window end passed without a captcha unlock — nothing to fire this slot.');
+  return { prefetched: null, matched: frozen || lastMatched, openNow: false };
 }
 
 // ── Phase B: at T=0 FIRE the pre-computed plan INSTANTLY (no fetch first, so we
@@ -231,7 +234,7 @@ async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched, open
     const fireAt = openNow ? 0 : (prefetched ? w.start - cfg.SUBMIT_LEAD_MS : w.start);
     while (sap.serverNow() < fireAt) await sleep(1);
     const plan = planBatches(preMatched, cfg.MAX_ROWS_PER_BATCH);
-    const capMode = openNow ? 'slot-flip detected, fetch captcha now' : (prefetched ? `prefetched captcha, fire ${cfg.SUBMIT_LEAD_MS}ms early` : 'fetch captcha now (fresh at open)');
+    const capMode = openNow ? 'window unlocked — using fresh unlock captcha' : (prefetched ? `prefetched captcha, fire ${cfg.SUBMIT_LEAD_MS}ms early` : 'fetch captcha now (fresh at open)');
     log.bold(`⚡ T=0 INSTANT FIRE — ${preMatched.length} pre-matched order(s), ${plan.length} batch(es) [${capMode}]`);
     logMatched(preMatched, submittedKeys, plan, true);
     await submitPlan(sap, store, plan, prefetched, submittedKeys, failedKeys);

@@ -46,11 +46,12 @@ const CONFIG = {
   ORDER_POLL_MS_OPEN: int(process.env.ORDER_POLL_MS_OPEN, 600),      // fetch new orders while window OPEN
 
   // Slot-flip detection: in the final WINDOW_DETECT_LEAD_MS before computed open,
-  // poll SAP every WINDOW_DETECT_POLL_MS and FIRE the instant plantConf's slot
-  // changes (true server-side "window open" signal). No local-clock fallback:
-  // the bot waits strictly for the real slot flip.
-  WINDOW_DETECT_LEAD_MS: int(process.env.WINDOW_DETECT_LEAD_MS, 5000), // start fast slot-flip polling this early
-  WINDOW_DETECT_POLL_MS: int(process.env.WINDOW_DETECT_POLL_MS, 10),   // gap between slot-flip probes (network-bound in practice)
+  // poll SAP captcha every WINDOW_DETECT_POLL_MS and FIRE the instant SAP unlocks
+  // the captcha (true server-side "window open" signal). Orders are FROZEN at
+  // FREEZE_LEAD_MS before open. No local-clock fallback.
+  WINDOW_DETECT_LEAD_MS: int(process.env.WINDOW_DETECT_LEAD_MS, 5000), // start captcha-unlock polling this early
+  WINDOW_DETECT_POLL_MS: int(process.env.WINDOW_DETECT_POLL_MS, 10),   // gap between unlock probes
+  FREEZE_LEAD_MS: int(process.env.FREEZE_LEAD_MS, 2000),               // freeze matched orders this many ms before open
   WINDOW_MINUTES: mins(process.env.WINDOW_MINUTES, [15, 45]),
   WINDOW_SOURCE: process.env.WINDOW_SOURCE || 'computed', // 'computed' (IST :15/:45) | 'plantConf'
   WINDOW_DURATION_MIN: int(process.env.WINDOW_DURATION_MIN, 10),
