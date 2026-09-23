@@ -49,6 +49,11 @@ CAPTCHA_MAX_RETRY=8
 ORDER_POLL_MS_CLOSED=5000
 ORDER_POLL_MS_OPEN=600
 
+# Window-open trigger: T-5s pe fast polling shuru, SAP slot flip hote hi INSTANT fire
+WINDOW_DETECT_LEAD_MS=5000
+# Slot-flip check ke beech gap (10ms = flat-out, network jitni de utni tez)
+WINDOW_DETECT_POLL_MS=10
+
 # ─── Modes ──────────────────────────────────
 LOOP_CONTINUOUS=true
 DRY_RUN=false

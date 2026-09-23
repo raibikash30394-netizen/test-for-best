@@ -44,6 +44,13 @@ const CONFIG = {
   RETRY_GAP_MS: int(process.env.RETRY_GAP_MS, 150),          // gap between captcha poll attempts (lets SAP issue a fresh captcha)
   ORDER_POLL_MS_CLOSED: int(process.env.ORDER_POLL_MS_CLOSED, 5000), // fetch new orders while window CLOSED
   ORDER_POLL_MS_OPEN: int(process.env.ORDER_POLL_MS_OPEN, 600),      // fetch new orders while window OPEN
+
+  // Slot-flip detection: in the final WINDOW_DETECT_LEAD_MS before computed open,
+  // poll SAP every WINDOW_DETECT_POLL_MS and FIRE the instant plantConf's slot
+  // changes (true server-side "window open" signal). No local-clock fallback:
+  // the bot waits strictly for the real slot flip.
+  WINDOW_DETECT_LEAD_MS: int(process.env.WINDOW_DETECT_LEAD_MS, 5000), // start fast slot-flip polling this early
+  WINDOW_DETECT_POLL_MS: int(process.env.WINDOW_DETECT_POLL_MS, 10),   // gap between slot-flip probes (network-bound in practice)
   WINDOW_MINUTES: mins(process.env.WINDOW_MINUTES, [15, 45]),
   WINDOW_SOURCE: process.env.WINDOW_SOURCE || 'computed', // 'computed' (IST :15/:45) | 'plantConf'
   WINDOW_DURATION_MIN: int(process.env.WINDOW_DURATION_MIN, 10),

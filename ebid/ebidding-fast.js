@@ -143,19 +143,27 @@ function logMatched(matched, submittedKeys, plan, openWindow) {
 // ── Phase A: pre-window monitor. Keep fetching orders while the window is
 // CLOSED, match + build the batch plan ready, log matches. Near open, poll the
 // captcha endpoint to catch the exact moment SAP opens and prewarm batch-1.
+// Composite slot key — the true server-side "window open" fingerprint. When SAP
+// flips to the new bidding slot, either SlotNumber or SlotStartTime changes.
+function slotKey(sap) {
+  const pc = sap.plantConf;
+  return pc ? `${pc.SlotNumber}|${pc.SlotStartTime}` : 'none';
+}
+
 async function preWindowMonitor(sap, store, csv, w) {
   const ist = ms => new Date(ms + 330 * 60000).toISOString().substring(11, 19);
-  const lead = cfg.CAPTCHA_PREFETCH_MS;   // 0 = don't prewarm; fetch captcha at T=0 (recommended)
-  const spin = Math.max(lead, 2500);       // stop heavy order-fetch this early; just spin to hit T=0 exactly
+  const lead = cfg.CAPTCHA_PREFETCH_MS;         // 0 = don't prewarm (recommended)
+  const detectLead = cfg.WINDOW_DETECT_LEAD_MS; // start fast slot-flip polling this early
   let reloggedIn = false, prefetched = null, lastSig = null;
   let lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-  log.info(`Monitoring for orders while window is CLOSED... (captcha prefetch: ${lead ? lead + 'ms before open' : 'OFF — fetch at T=0'})`);
-  while (sap.serverNow() < w.start) {
+  log.info(`Monitoring orders while window CLOSED... (slot-flip detect: T-${detectLead}ms @ every ${cfg.WINDOW_DETECT_POLL_MS}ms)`);
+
+  // ── Phase A1: relaxed monitoring until T-detectLead ──────────────────────
+  while (sap.serverNow() < w.start - detectLead) {
     const remain = w.start - sap.serverNow();
     if (remain <= 60000 && !reloggedIn) { process.stdout.write('\n'); await sap.login(); reloggedIn = true; log.info('Re-logged in (T-60s), session warm'); }
 
-    // Prewarm captcha at the configured lead (only if enabled). NOTE: SAP has
-    // been observed to REJECT pre-window captchas — keep lead=0 unless testing.
+    // Optional captcha prewarm (default OFF; SAP rejects pre-window captchas).
     if (lead > 0 && remain <= lead && !prefetched) {
       const img = await sap.fetchCaptcha(true);
       if (img) {
@@ -163,15 +171,9 @@ async function preWindowMonitor(sap, store, csv, w) {
         prefetched = s ? s.result : null;
         process.stdout.write('\n');
         log.ok(`Captcha prefetched at T-${remain}ms${prefetched ? ' -> "' + prefetched + '"' : ' (pool-miss)'}`);
-        // Hand off NOW so the submit loop can fire at T - SUBMIT_LEAD_MS (early).
-        if (prefetched) return { prefetched, matched: lastMatched };
       }
     }
 
-    // In the final `spin` window, poll tightly (no order fetch) so we exit exactly at T=0.
-    if (remain <= spin) { await sleep(cfg.CAPTCHA_POLL_MS); continue; }
-
-    // Otherwise: fetch fresh orders, match, keep plan ready, log on change.
     await sap.fetchOrders();
     lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
     const sig = lastMatched.map(m => m.item.SapOrderId).sort().join(',');
@@ -183,26 +185,53 @@ async function preWindowMonitor(sap, store, csv, w) {
       lastSig = sig;
     }
     process.stdout.write(`\r  ⏳ window opens ${ist(w.start)} IST (in ${tu.fmtCountdown(remain)}) | ${lastMatched.length} match ready   `);
-    const wait = Math.min(cfg.ORDER_POLL_MS_CLOSED, remain - spin);
+    const wait = Math.min(cfg.ORDER_POLL_MS_CLOSED, remain - detectLead);
     await sleep(Math.max(50, wait));
   }
+
+  // ── Phase A2: FAST slot-flip detection — fire the instant SAP opens ──────
+  // Baseline = the slot SAP reports while still CLOSED. We poll flat-out and the
+  // moment the slot changes we return openNow=true so Phase B fires immediately.
+  // Per requirement: NO local-clock fallback — we wait strictly for the flip.
+  const baseline = slotKey(sap);
   process.stdout.write('\n');
-  return { prefetched, matched: lastMatched };
+  log.bold(`🔎 Slot-flip watch armed (baseline slot=${baseline}) — will FIRE the instant SAP opens`);
+  while (true) {
+    if (await sap.fetchOrders()) {
+      lastMatched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
+      const cur = slotKey(sap);
+      if (cur !== 'none' && cur !== baseline) {
+        process.stdout.write('\n');
+        log.ok(`🎯 SLOT FLIP (${baseline} → ${cur}) — WINDOW OPEN, firing instantly`);
+        return { prefetched, matched: lastMatched, openNow: true };
+      }
+      const remain = w.start - sap.serverNow();
+      const clk = remain > 0 ? 'T-' + tu.fmtCountdown(remain) : 'T+' + tu.fmtCountdown(-remain);
+      process.stdout.write(`\r  🔎 waiting for slot flip (clock ${clk}) baseline=${baseline} | ${lastMatched.length} ready   `);
+    }
+    // Safety net: if the whole window elapsed without a flip, stop waiting.
+    if (sap.serverNow() >= w.end) {
+      process.stdout.write('\n');
+      log.warn('Window end passed without a slot flip — no fire this slot.');
+      return { prefetched, matched: lastMatched, openNow: false };
+    }
+    await sleep(cfg.WINDOW_DETECT_POLL_MS);
+  }
 }
 
 // ── Phase B: at T=0 FIRE the pre-computed plan INSTANTLY (no fetch first, so we
 // beat the 14 vendors), then keep fetching for NEW/late orders and submit them.
-async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched) {
+async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched, openNow) {
   const submittedKeys = new Set();
   const failedKeys = new Set(); // terminal business rejections — skip for this window
 
-  // ⚡ INSTANT FIRE at T=0 (or SUBMIT_LEAD_MS early if captcha already prewarmed).
+  // ⚡ INSTANT FIRE. If openNow (slot flip already detected) fire with ZERO wait.
+  // Otherwise fall back to the clock: SUBMIT_LEAD_MS early if a captcha is prewarmed.
   if (preMatched && preMatched.length) {
-    // Fire early only when we hold a prewarmed captcha; else wait for exact open.
-    const fireAt = prefetched ? w.start - cfg.SUBMIT_LEAD_MS : w.start;
+    const fireAt = openNow ? 0 : (prefetched ? w.start - cfg.SUBMIT_LEAD_MS : w.start);
     while (sap.serverNow() < fireAt) await sleep(1);
     const plan = planBatches(preMatched, cfg.MAX_ROWS_PER_BATCH);
-    const capMode = prefetched ? `prefetched captcha, fire ${cfg.SUBMIT_LEAD_MS}ms early` : 'fetch captcha now (fresh at open)';
+    const capMode = openNow ? 'slot-flip detected, fetch captcha now' : (prefetched ? `prefetched captcha, fire ${cfg.SUBMIT_LEAD_MS}ms early` : 'fetch captcha now (fresh at open)');
     log.bold(`⚡ T=0 INSTANT FIRE — ${preMatched.length} pre-matched order(s), ${plan.length} batch(es) [${capMode}]`);
     logMatched(preMatched, submittedKeys, plan, true);
     await submitPlan(sap, store, plan, prefetched, submittedKeys, failedKeys);
@@ -268,17 +297,20 @@ async function runCycle(sap, store) {
 
   if (now >= w.end) { log.warn('Window already closed. Waiting for next slot...'); await sleep(2000); return { status: 'expired', window: w }; }
 
-  // Phase A — pre-window: keep polling for orders, build plan ready.
-  let prefetched = null, preMatched = matched0;
+  // Phase A — pre-window: monitor orders, then FAST slot-flip detection near open.
+  let prefetched = null, preMatched = matched0, openNow = false;
   if (sap.serverNow() < w.start) {
     const pre = await preWindowMonitor(sap, store, csv, w);
     prefetched = pre.prefetched;
     preMatched = pre.matched;
+    openNow = pre.openNow;
+  } else {
+    openNow = true; // already inside the window
   }
 
-  // Phase B — window OPEN: INSTANT fire at T=0, then watch for late orders.
+  // Phase B — window OPEN: INSTANT fire, then watch for late orders.
   log.bold('🚀 WINDOW OPEN — instant fire + watching for new orders');
-  const submitted = await windowSubmitLoop(sap, store, csv, w, prefetched, preMatched);
+  const submitted = await windowSubmitLoop(sap, store, csv, w, prefetched, preMatched, openNow);
   log.bold(`Window done — ${submitted.size} order-unit(s) submitted this slot`);
 
   flushDeferred(store, csv);
