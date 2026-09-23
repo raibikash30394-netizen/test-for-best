@@ -37,8 +37,8 @@ const CONFIG = {
 
   // Timing (all ms unless noted)
   PREWARM_LEAD_MS: int(process.env.PREWARM_LEAD_MS, 90000), // start warming this early
-  SUBMIT_LEAD_MS: int(process.env.SUBMIT_LEAD_MS, 500),     // (legacy) begin captcha poll this early
-  CAPTCHA_PREFETCH_MS: int(process.env.CAPTCHA_PREFETCH_MS, 0), // fetch captcha this many ms BEFORE open; 0 = fetch at T=0 (SAP rejects pre-window captchas)
+  SUBMIT_LEAD_MS: int(process.env.SUBMIT_LEAD_MS, 0),      // fire submit this many ms BEFORE open (only when captcha prefetched); 0 = fire exactly at T=0
+  CAPTCHA_PREFETCH_MS: int(process.env.CAPTCHA_PREFETCH_MS, 50), // fetch captcha this many ms BEFORE open; 50 = proven sweet spot; 0 = fetch at T=0
   CAPTCHA_POLL_MS: int(process.env.CAPTCHA_POLL_MS, 10),    // poll interval while window opens
   CAPTCHA_MAX_RETRY: int(process.env.CAPTCHA_MAX_RETRY, 3),  // max captcha refetch/retries per batch before backing off
   RETRY_GAP_MS: int(process.env.RETRY_GAP_MS, 20),          // tight adaptive retry gap

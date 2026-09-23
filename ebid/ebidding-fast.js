@@ -65,58 +65,53 @@ async function submitBatch(sap, store, rows, captcha, batchNo) {
     }
     const msg = (res.message || '').toLowerCase();
 
-    // "Same amount has been bid by other vendor" => your bid IS saved (just a tie
-    // notice). Winner is decided by SPEED, not amount, so treat as SUCCESS and do
-    // NOT resubmit (resubmitting only wastes precious time).
-    if (msg.includes('same amount has been bid')) {
+    // TIE = your bid IS saved (covers "Same amount…" and "Same Avg amount…").
+    // Winner decided by SPEED not amount -> SUCCESS, do NOT resubmit.
+    if (msg.includes('amount has been bid by other vendor')) {
       log.ok(`✅ batch ${batchNo} SAVED (tie: same amount as other vendor(s) — fastest wins)`);
       return { ok: true, res };
     }
 
-    // Hard captcha lock: SAP blocks after repeated failures. Do NOT hammer —
-    // bail out and let the window watch-loop retry on the next poll (breather).
-    if (msg.includes('contact administrator') || msg.includes('captcha validation failed')) {
-      log.err(`batch ${batchNo}: SAP captcha lock ("${res.message}") — backing off, will retry next poll`);
-      return { ok: false, res };
+    // HARD lock only when SAP explicitly says "Contact Administrator" — back off.
+    if (msg.includes('contact administrator')) {
+      log.err(`batch ${batchNo}: SAP captcha lock ("${res.message}") — backing off, retry next poll`);
+      return { ok: false, res, retryable: true };
     }
 
-    if (res.type === 'I') {
+    // WRONG captcha (incl. "Captcha Validation Failed. Worng Captcha Value") ->
+    // retry INSTANTLY with a fresh captcha (not a lock).
+    const wrongCaptcha = res.type === 'I' || msg.includes('captcha validation failed') ||
+      msg.includes('wrong captcha') || msg.includes('worng captcha');
+    if (wrongCaptcha) {
       captchaTries++;
       if (captchaTries > cfg.CAPTCHA_MAX_RETRY) {
-        log.err(`batch ${batchNo}: captcha rejected — gave up after ${cfg.CAPTCHA_MAX_RETRY} retries (will retry next poll)`);
-        return { ok: false, res };
+        log.err(`batch ${batchNo}: wrong captcha — gave up after ${cfg.CAPTCHA_MAX_RETRY} retries (retry next poll)`);
+        return { ok: false, res, retryable: true };
       }
-      log.warn(`batch ${batchNo}: captcha rejected (${captchaTries}/${cfg.CAPTCHA_MAX_RETRY}), refetching...`);
+      log.warn(`batch ${batchNo}: wrong captcha (${captchaTries}/${cfg.CAPTCHA_MAX_RETRY}), refetching...`);
       await sleep(cfg.RETRY_GAP_MS);
       cap = await solver.fetchAndSolve(sap, store, cfg, log, 3);
-      if (!cap) return { ok: false, res: { type: 'E', message: 'no captcha on retry' } };
+      if (!cap) return { ok: false, res: { type: 'E', message: 'no captcha on retry' }, retryable: true };
       continue;
     }
+
     if (res.type === 'E') {
       if (res.status === 403) { await sap.refreshCsrf(); continue; }
-      const idM = msg.match(/order\s*id\s*:\s*(\d+)/i);
-      const amtM = msg.match(/equal to\s*([\d.]+)/i);
-      if (cfg.AUTO_UPDATE_CSV_BIDS && idM && amtM &&
-        (msg.includes('amount') || msg.includes('greater than'))) {
-        // Bump amount in memory now; DISK write deferred to post-window.
-        const oid = idM[1], newAmt = amtM[1];
-        log.warn(`SAP wants Order ${oid} >= ${newAmt} — bumping in-memory & retrying`);
-        for (const r of rows) if (r.item.SapOrderId === oid) r.bidAmount = Number(newAmt).toFixed();
-        queueCsvFix(oid, newAmt);
-        continue;
-      }
-      log.err(`batch ${batchNo} business rejection: ${res.message}`);
-      return { ok: false, res };
+      // Terminal business rule (e.g. "Reduce your bid by minimum Rs X"). We do NOT
+      // change the CSV amount (hard limit), so this order can't be saved this
+      // window — mark terminal so the watch-loop stops retrying it.
+      log.err(`batch ${batchNo} business rejection (skipping this window): ${res.message}`);
+      return { ok: false, res, retryable: false };
     }
   }
-  return { ok: false, res: { type: 'E', message: 'max retries' } };
+  return { ok: false, res: { type: 'E', message: 'max retries' }, retryable: true };
 }
 
 // ── SEQUENTIAL submit: SAP binds ONE captcha per session, so batch N+1's captcha
-// is fetched only AFTER batch N is fully submitted. (Parallel prefetch clobbered
-// the in-flight captcha and caused "Captcha Validation Failed" locks.)
-async function submitPlan(sap, store, plan, prefetched, submittedKeys) {
+// is fetched only AFTER batch N is fully submitted.
+async function submitPlan(sap, store, plan, prefetched, submittedKeys, failedKeys) {
   submittedKeys = submittedKeys || new Set();
+  failedKeys = failedKeys || new Set();
   log.bold(`Submitting ${plan.length} batch(es) — sequential (one fresh captcha per batch)`);
 
   for (let i = 0; i < plan.length; i++) {
@@ -125,8 +120,9 @@ async function submitPlan(sap, store, plan, prefetched, submittedKeys) {
     // Fetch + solve THIS batch's captcha now — never overlaps another batch.
     const cap = (i === 0 && prefetched) ? prefetched : await solver.fetchAndSolve(sap, store, cfg, log);
     if (!cap) { log.err(`batch ${i + 1}: no captcha (pool-miss) — skipping, will retry next poll`); continue; }
-    const { ok } = await submitBatch(sap, store, rows, cap, i + 1);
-    if (ok) for (const u of plan[i]) submittedKeys.add(u.key);
+    const r = await submitBatch(sap, store, rows, cap, i + 1);
+    if (r.ok) for (const u of plan[i]) submittedKeys.add(u.key);
+    else if (r.retryable === false) for (const u of plan[i]) failedKeys.add(u.key); // terminal: don't retry this window
   }
   return submittedKeys;
 }
@@ -170,6 +166,8 @@ async function preWindowMonitor(sap, store, csv, w) {
         prefetched = s ? s.result : null;
         process.stdout.write('\n');
         log.ok(`Captcha prefetched at T-${remain}ms${prefetched ? ' -> "' + prefetched + '"' : ' (pool-miss)'}`);
+        // Hand off NOW so the submit loop can fire at T - SUBMIT_LEAD_MS (early).
+        if (prefetched) return { prefetched, matched: lastMatched };
       }
     }
 
@@ -199,16 +197,18 @@ async function preWindowMonitor(sap, store, csv, w) {
 // beat the 14 vendors), then keep fetching for NEW/late orders and submit them.
 async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched) {
   const submittedKeys = new Set();
+  const failedKeys = new Set(); // terminal business rejections — skip for this window
 
-  // ⚡ INSTANT FIRE at T=0 using the pre-window plan + prewarmed captcha.
+  // ⚡ INSTANT FIRE at T=0 (or SUBMIT_LEAD_MS early if captcha already prewarmed).
   if (preMatched && preMatched.length) {
-    // If we prewarmed slightly early, wait for the exact open instant (not before).
-    while (sap.serverNow() < w.start) await sleep(2);
+    // Fire early only when we hold a prewarmed captcha; else wait for exact open.
+    const fireAt = prefetched ? w.start - cfg.SUBMIT_LEAD_MS : w.start;
+    while (sap.serverNow() < fireAt) await sleep(1);
     const plan = planBatches(preMatched, cfg.MAX_ROWS_PER_BATCH);
-    const capMode = prefetched ? 'prefetched captcha' : 'fetch captcha now (fresh at open)';
+    const capMode = prefetched ? `prefetched captcha, fire ${cfg.SUBMIT_LEAD_MS}ms early` : 'fetch captcha now (fresh at open)';
     log.bold(`⚡ T=0 INSTANT FIRE — ${preMatched.length} pre-matched order(s), ${plan.length} batch(es) [${capMode}]`);
     logMatched(preMatched, submittedKeys, plan, true);
-    await submitPlan(sap, store, plan, prefetched, submittedKeys);
+    await submitPlan(sap, store, plan, prefetched, submittedKeys, failedKeys);
   } else {
     log.info('No pre-matched orders — will fetch at open.');
   }
@@ -218,18 +218,22 @@ async function windowSubmitLoop(sap, store, csv, w, prefetched, preMatched) {
   while (sap.serverNow() < w.end) {
     if (!await sap.fetchOrders()) { await sleep(cfg.ORDER_POLL_MS_OPEN); continue; }
     const matched = matchRows(csv.csvData, csv.deleteList, sap.bidRows);
-    const pending = matched.filter(m => !submittedKeys.has(unitKey(m.item)));
+    const pending = matched.filter(m => {
+      const k = unitKey(m.item);
+      return !submittedKeys.has(k) && !failedKeys.has(k);
+    });
 
-    const sig = matched.map(m => m.item.SapOrderId).sort().join(',') + '|' + submittedKeys.size;
+    const sig = matched.map(m => m.item.SapOrderId).sort().join(',') + '|' + submittedKeys.size + '|' + failedKeys.size;
     if (sig !== lastSig) { logMatched(matched, submittedKeys, null, true); lastSig = sig; }
 
     if (pending.length) {
       const plan = planBatches(pending, cfg.MAX_ROWS_PER_BATCH);
       log.bold(`⚡ ${pending.length} new/pending order(s) -> submitting ${plan.length} batch(es) now`);
-      await submitPlan(sap, store, plan, null, submittedKeys);
+      await submitPlan(sap, store, plan, null, submittedKeys, failedKeys);
     } else {
       const left = w.end - sap.serverNow();
-      process.stdout.write(`\r  🟢 window OPEN — watching for new orders (${tu.fmtCountdown(left)} left)   `);
+      const skip = failedKeys.size ? `, ${failedKeys.size} skipped` : '';
+      process.stdout.write(`\r  🟢 window OPEN — watching for new orders (${tu.fmtCountdown(left)} left${skip})   `);
     }
     await sleep(cfg.ORDER_POLL_MS_OPEN);
   }

@@ -89,6 +89,39 @@ function makeSap(events, submitBehavior) {
     assert.equal(events.filter(e => e === 'submit').length, 1, 'must NOT resubmit on tie, got ' + JSON.stringify(events));
   });
 
+  await test('"Same Avg amount bid by other vendor" also treated as SAVED', async () => {
+    const events = [];
+    const sap = makeSap(events, () => ({ type: 'E', message: 'Same Avg amount has been bid by other vendor for Order : 557723382 posnr : 11' }));
+    const r = await submitBatch(sap, store, [{ item: { SapOrderId: '1' }, bidAmount: '100' }], 'CAP', 1);
+    assert.equal(r.ok, true, 'avg-amount tie must be success');
+    assert.equal(events.filter(e => e === 'submit').length, 1);
+  });
+
+  await test('"Reduce your bid by minimum Rs 2" is TERMINAL (retryable=false, no loop)', async () => {
+    const events = [];
+    const sap = makeSap(events, () => ({ type: 'E', message: 'Reduce your bid by minimum Rs 2. from frieght amount for COF order 115715447 Line no 11' }));
+    const r = await submitBatch(sap, store, [{ item: { SapOrderId: '1' }, bidAmount: '100' }], 'CAP', 1);
+    assert.equal(r.ok, false);
+    assert.equal(r.retryable, false, 'must be terminal so watch-loop skips it (no infinite retry)');
+    assert.equal(events.filter(e => e === 'submit').length, 1);
+  });
+
+  await test('"Captcha Validation Failed. Worng Captcha Value" RETRIES (not a lock)', async () => {
+    const events = [];
+    const sap = makeSap(events, () => ({ type: 'E', message: 'Captcha Validation Failed. Worng Captcha Value.' }));
+    const r = await submitBatch(sap, store, [{ item: { SapOrderId: '1' }, bidAmount: '100' }], 'CAP', 1);
+    assert.equal(r.ok, false);
+    // wrong captcha => retried up to CAPTCHA_MAX_RETRY(3) => >1 submit (not immediate backoff)
+    assert.ok(events.filter(e => e === 'submit').length >= 2, 'wrong captcha must retry, got ' + JSON.stringify(events));
+  });
+
+  await test('terminal failure marks unit in failedKeys (submitPlan)', async () => {
+    const sap = makeSap([], () => ({ type: 'E', message: 'Reduce your bid by minimum Rs 2' }));
+    const submitted = new Set(), failed = new Set();
+    await submitPlan(sap, store, [[unit('9')]], null, submitted, failed);
+    assert.ok(failed.has('u9') && !submitted.has('u9'));
+  });
+
   console.log('\n──────────────────────────────');
   console.log(`  ${pass} passed, ${fail} failed`);
   console.log('──────────────────────────────\n');
